@@ -62,8 +62,11 @@ All configuration is via environment variables:
 | `PROJECT_TRACKER_TOKEN_FILE` | `./agent_tokens.json` | Generated per-agent API-key file |
 | `PROJECT_TRACKER_HOST` | `0.0.0.0` | Bind host |
 | `PROJECT_TRACKER_PORT` | `5055` | HTTP port |
-| `PROJECT_TRACKER_INPUT_RATE` | `5.00` | USD per 1M input tokens |
-| `PROJECT_TRACKER_OUTPUT_RATE` | `30.00` | USD per 1M output tokens |
+| `PROJECT_TRACKER_TOKEN_INPUT_RATE_PER_M` | `5.00` | USD per 1M uncached input tokens |
+| `PROJECT_TRACKER_TOKEN_CACHED_INPUT_RATE_PER_M` | `0.50` | USD per 1M cached input / cache-read tokens |
+| `PROJECT_TRACKER_TOKEN_OUTPUT_RATE_PER_M` | `30.00` | USD per 1M output tokens |
+
+Legacy `PROJECT_TRACKER_INPUT_RATE` and `PROJECT_TRACKER_OUTPUT_RATE` are still accepted as fallbacks for older deployments.
 
 Example:
 
@@ -133,7 +136,9 @@ curl -sS -X POST \
   -d '{
     "summary": "Implemented the first version of the integration.",
     "input_tokens": 12000,
+    "cached_input_tokens": 8000,
     "output_tokens": 2500,
+    "reasoning_tokens": 500,
     "total_tokens": 14500,
     "model": "model/provider used",
     "commit_refs": ["abc1234 Initial implementation"],
@@ -145,7 +150,7 @@ curl -sS -X POST \
   }'
 ```
 
-If an agent cannot access exact token usage, it should report `0` rather than guessing.
+If an agent cannot access exact token usage, it should report `0` rather than guessing. `cached_input_tokens` is treated as a subset of `input_tokens` for cost calculations; `reasoning_tokens` is tracked separately for visibility and is not added on top of output cost when providers already include reasoning in output tokens.
 
 ## Project shorthand IDs
 

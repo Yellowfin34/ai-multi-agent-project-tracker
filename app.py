@@ -18,8 +18,9 @@ Configuration is via environment variables:
 - PROJECT_TRACKER_TOKEN_FILE=/path/to/agent_tokens.json
 - PROJECT_TRACKER_HOST=127.0.0.1
 - PROJECT_TRACKER_PORT=5055
-- PROJECT_TRACKER_INPUT_RATE=5.0      # dollars per million input tokens
-- PROJECT_TRACKER_OUTPUT_RATE=30.0    # dollars per million output tokens
+- PROJECT_TRACKER_TOKEN_INPUT_RATE_PER_M=5.0         # dollars per million uncached input tokens
+- PROJECT_TRACKER_TOKEN_CACHED_INPUT_RATE_PER_M=0.5  # dollars per million cached input tokens
+- PROJECT_TRACKER_TOKEN_OUTPUT_RATE_PER_M=30.0       # dollars per million output tokens
 
 Run locally with: ``python3 app.py`` then open http://127.0.0.1:5055/
 """
@@ -98,6 +99,43 @@ def parse_json_list(value):
         return []
 
 
+def nonnegative_int(value, default: int = 0) -> int:
+    try:
+        return max(0, int(value if value is not None else default))
+    except (TypeError, ValueError):
+        return max(0, int(default or 0))
+
+
+def token_rates() -> dict:
+    def rate(new_name: str, old_name: str | None, default: str) -> float:
+        raw = os.environ.get(new_name)
+        if raw is None and old_name:
+            raw = os.environ.get(old_name)
+        try:
+            return float(raw if raw is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+    return {
+        "input_rate_per_million": rate("PROJECT_TRACKER_TOKEN_INPUT_RATE_PER_M", "PROJECT_TRACKER_INPUT_RATE", "5.00"),
+        "cached_input_rate_per_million": rate("PROJECT_TRACKER_TOKEN_CACHED_INPUT_RATE_PER_M", None, "0.50"),
+        "output_rate_per_million": rate("PROJECT_TRACKER_TOKEN_OUTPUT_RATE_PER_M", "PROJECT_TRACKER_OUTPUT_RATE", "30.00"),
+    }
+
+
+def estimated_token_cost(row: dict) -> float:
+    rates = token_rates()
+    input_tokens = nonnegative_int(row.get("input_tokens", 0))
+    cached_input_tokens = min(input_tokens, nonnegative_int(row.get("cached_input_tokens", 0)))
+    uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
+    output_tokens = nonnegative_int(row.get("output_tokens", 0))
+    return round(
+        (uncached_input_tokens / 1000000.0 * rates["input_rate_per_million"])
+        + (cached_input_tokens / 1000000.0 * rates["cached_input_rate_per_million"])
+        + (output_tokens / 1000000.0 * rates["output_rate_per_million"]),
+        6,
+    )
+
+
 def add_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
     if column not in cols:
@@ -164,25 +202,30 @@ def ensure_project_codes(conn: sqlite3.Connection) -> None:
 
 def event_from_row(row: sqlite3.Row) -> dict:
     item = dict(row)
-    item["input_tokens"] = int(item.get("input_tokens") or 0)
-    item["output_tokens"] = int(item.get("output_tokens") or 0)
-    item["total_tokens"] = int(item.get("total_tokens") or (item["input_tokens"] + item["output_tokens"]))
+    item["input_tokens"] = nonnegative_int(item.get("input_tokens") or 0)
+    item["cached_input_tokens"] = min(item["input_tokens"], nonnegative_int(item.get("cached_input_tokens") or 0))
+    item["output_tokens"] = nonnegative_int(item.get("output_tokens") or 0)
+    item["reasoning_tokens"] = nonnegative_int(item.get("reasoning_tokens") or 0)
+    item["total_tokens"] = nonnegative_int(item.get("total_tokens") or (item["input_tokens"] + item["output_tokens"]))
+    item["estimated_cost_usd"] = estimated_token_cost(item)
     item["commit_refs"] = parse_json_list(item.get("commit_refs_json"))
     return item
 
 
 # Append an immutable changelog entry. All meaningful agent work should go
 # through this path so Activity, Calendar, project pages, and token totals agree.
-def event(conn: sqlite3.Connection, project_id: int | None, agent_id: str, event_type: str, summary: str, before=None, after=None, input_tokens: int = 0, output_tokens: int = 0, total_tokens: int | None = None, model: str = "", commit_refs=None) -> None:
-    input_tokens = max(0, int(input_tokens or 0))
-    output_tokens = max(0, int(output_tokens or 0))
-    total_tokens = max(0, int(total_tokens if total_tokens is not None else input_tokens + output_tokens))
+def event(conn: sqlite3.Connection, project_id: int | None, agent_id: str, event_type: str, summary: str, before=None, after=None, input_tokens: int = 0, cached_input_tokens: int = 0, output_tokens: int = 0, reasoning_tokens: int = 0, total_tokens: int | None = None, model: str = "", commit_refs=None) -> None:
+    input_tokens = nonnegative_int(input_tokens)
+    cached_input_tokens = min(input_tokens, nonnegative_int(cached_input_tokens))
+    output_tokens = nonnegative_int(output_tokens)
+    reasoning_tokens = nonnegative_int(reasoning_tokens)
+    total_tokens = nonnegative_int(total_tokens if total_tokens is not None else input_tokens + output_tokens)
     conn.execute(
         """
-        INSERT INTO project_events (project_id, agent_id, event_type, summary, before_json, after_json, created_at, input_tokens, output_tokens, total_tokens, model, commit_refs_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO project_events (project_id, agent_id, event_type, summary, before_json, after_json, created_at, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, total_tokens, model, commit_refs_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (project_id, agent_id, event_type, summary, json.dumps(before, sort_keys=True) if before is not None else None, json.dumps(after, sort_keys=True) if after is not None else None, now_iso(), input_tokens, output_tokens, total_tokens, model or "", json.dumps(normalize_list(commit_refs))),
+        (project_id, agent_id, event_type, summary, json.dumps(before, sort_keys=True) if before is not None else None, json.dumps(after, sort_keys=True) if after is not None else None, now_iso(), input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, total_tokens, model or "", json.dumps(normalize_list(commit_refs))),
     )
 
 
@@ -265,7 +308,9 @@ def init_db() -> None:
         )
         for column, definition in {
             "input_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
             "output_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "reasoning_tokens": "INTEGER NOT NULL DEFAULT 0",
             "total_tokens": "INTEGER NOT NULL DEFAULT 0",
             "model": "TEXT NOT NULL DEFAULT ''",
             "commit_refs_json": "TEXT NOT NULL DEFAULT '[]'",
@@ -734,23 +779,25 @@ function renderCalendar(){
 }
 function tokenTable(title, rows, nameFn){
   if(!rows || !rows.length) return `<article class="card"><h3>${esc(title)}</h3><p>No token usage recorded.</p></article>`;
-  return `<article class="card"><h3>${esc(title)}</h3><div class="tablewrap"><table><thead><tr><th>Name</th><th>Total</th><th>Input</th><th>Output</th><th>Updates</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(nameFn(r))}</td><td>${Number(r.total_tokens||0).toLocaleString()}</td><td>${Number(r.input_tokens||0).toLocaleString()}</td><td>${Number(r.output_tokens||0).toLocaleString()}</td><td>${Number(r.updates||0)}</td></tr>`).join('')}</tbody></table></div></article>`;
+  return `<article class="card"><h3>${esc(title)}</h3><div class="tablewrap"><table><thead><tr><th>Name</th><th>Total</th><th>Input</th><th>Cached input</th><th>Output</th><th>Reasoning</th><th>Updates</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(nameFn(r))}</td><td>${Number(r.total_tokens||0).toLocaleString()}</td><td>${Number(r.input_tokens||0).toLocaleString()}</td><td>${Number(r.cached_input_tokens||0).toLocaleString()}</td><td>${Number(r.output_tokens||0).toLocaleString()}</td><td>${Number(r.reasoning_tokens||0).toLocaleString()}</td><td>${Number(r.updates||0)}</td></tr>`).join('')}</tbody></table></div></article>`;
 }
 function money(n){ return '$' + Number(n||0).toFixed(2); }
 function costCard(label, data){
   data = data || {};
-  return `<div class="stat"><strong>${money(data.estimated_cost_usd)}</strong><span class="sub">${esc(label)} · ${Number(data.total_tokens||0).toLocaleString()} tokens</span><div class="sub">In ${Number(data.input_tokens||0).toLocaleString()} / Out ${Number(data.output_tokens||0).toLocaleString()}</div></div>`;
+  return `<div class="stat"><strong>${money(data.estimated_cost_usd)}</strong><span class="sub">${esc(label)} · ${Number(data.total_tokens||0).toLocaleString()} tokens</span><div class="sub">Input ${Number(data.input_tokens||0).toLocaleString()} (${Number(data.cached_input_tokens||0).toLocaleString()} cached) / Out ${Number(data.output_tokens||0).toLocaleString()} / Reasoning ${Number(data.reasoning_tokens||0).toLocaleString()}</div></div>`;
 }
 function costBlockHtml(){
   const periods = tokenCost.periods || {};
-  return `<article class="card"><h3>Estimated token cost — all agents</h3><p class="sub">$5.00 / 1M input tokens + $30.00 / 1M output tokens.</p><section class="stats">${costCard('Last 24 hours', periods.last_24h)}${costCard('Last 7 days', periods.last_7d)}${costCard('Last 30 days', periods.last_30d)}</section></article>`;
+  const inRate = Number(tokenCost.input_rate_per_million ?? 5).toFixed(2);
+  const cachedRate = Number(tokenCost.cached_input_rate_per_million ?? 0.5).toFixed(2);
+  const outRate = Number(tokenCost.output_rate_per_million ?? 30).toFixed(2);
+  return `<article class="card"><h3>Estimated token cost — all agents</h3><p class="sub">$${inRate} / 1M uncached input + $${cachedRate} / 1M cached input + $${outRate} / 1M output. Reasoning tokens are tracked separately and included in output when providers report them that way.</p><section class="stats">${costCard('Last 24 hours', periods.last_24h)}${costCard('Last 7 days', periods.last_7d)}${costCard('Last 30 days', periods.last_30d)}</section></article>`;
 }
 function renderMainCost(){ if($('#mainCostSummary')) $('#mainCostSummary').innerHTML = costBlockHtml(); }
 function renderTokens(){
   const totals = tokenData.totals || {};
-  const periods = tokenCost.periods || {};
   const costBlock = costBlockHtml();
-  $('#tokenSummary').innerHTML = costBlock + `<section class="stats"><div class="stat"><strong>${Number(totals.total_tokens||0).toLocaleString()}</strong><span class="sub">Tokens selected day</span></div><div class="stat"><strong>${Number(totals.input_tokens||0).toLocaleString()}</strong><span class="sub">Input tokens</span></div><div class="stat"><strong>${Number(totals.output_tokens||0).toLocaleString()}</strong><span class="sub">Output tokens</span></div><div class="stat"><strong>${Number(totals.updates||0)}</strong><span class="sub">Updates with usage</span></div></section>` + tokenTable('By agent', tokenData.by_agent||[], r=>agentName(r.agent_id)) + tokenTable('By project', tokenData.by_project||[], r=>r.project_name||'Tracker');
+  $('#tokenSummary').innerHTML = costBlock + `<section class="stats"><div class="stat"><strong>${Number(totals.total_tokens||0).toLocaleString()}</strong><span class="sub">Tokens selected day</span></div><div class="stat"><strong>${Number(totals.input_tokens||0).toLocaleString()}</strong><span class="sub">Input tokens</span></div><div class="stat"><strong>${Number(totals.cached_input_tokens||0).toLocaleString()}</strong><span class="sub">Cached input tokens</span></div><div class="stat"><strong>${Number(totals.output_tokens||0).toLocaleString()}</strong><span class="sub">Output tokens</span></div><div class="stat"><strong>${Number(totals.reasoning_tokens||0).toLocaleString()}</strong><span class="sub">Reasoning tokens</span></div><div class="stat"><strong>${Number(totals.updates||0)}</strong><span class="sub">Updates with usage</span></div></section>` + tokenTable('By agent', tokenData.by_agent||[], r=>agentName(r.agent_id)) + tokenTable('By project', tokenData.by_project||[], r=>r.project_name||'Tracker');
 }
 $('#stage').innerHTML = STAGES.map(s=>`<option>${s}</option>`).join('');
 $('#addBtn').onclick=()=>{ fillForm(); editor.showModal(); };
@@ -974,7 +1021,7 @@ class Handler(BaseHTTPRequestHandler):
                     LEFT JOIN projects p ON p.id=e.project_id
                     ORDER BY e.created_at DESC, e.id DESC LIMIT 100
                 """).fetchall()
-            return self.json_response([dict(r) for r in rows])
+            return self.json_response([event_from_row(r) for r in rows])
         if path == "/api/calendar":
             q = parse_qs(parsed.query)
             day = q.get("date", [now_iso()[:10]])[0]
@@ -989,26 +1036,41 @@ class Handler(BaseHTTPRequestHandler):
                 """, (start, end)).fetchall()
             return self.json_response([event_from_row(r) for r in rows])
         if path == "/api/token-cost-summary":
-            input_rate = float(os.environ.get("PROJECT_TRACKER_INPUT_RATE", "5.00"))
-            output_rate = float(os.environ.get("PROJECT_TRACKER_OUTPUT_RATE", "30.00"))
+            input_rate = float(os.environ.get("PROJECT_TRACKER_TOKEN_INPUT_RATE_PER_M", os.environ.get("PROJECT_TRACKER_INPUT_RATE", "5.00")))
+            cached_input_rate = float(os.environ.get("PROJECT_TRACKER_TOKEN_CACHED_INPUT_RATE_PER_M", "0.50"))
+            output_rate = float(os.environ.get("PROJECT_TRACKER_TOKEN_OUTPUT_RATE_PER_M", os.environ.get("PROJECT_TRACKER_OUTPUT_RATE", "30.00")))
+            def add_cost(row):
+                row["cached_input_tokens"] = min(int(row.get("cached_input_tokens") or 0), int(row.get("input_tokens") or 0))
+                row["uncached_input_tokens"] = max(0, int(row.get("input_tokens") or 0) - row["cached_input_tokens"])
+                row["estimated_cost_usd"] = round(
+                    (row["uncached_input_tokens"] / 1000000.0 * input_rate)
+                    + (row["cached_input_tokens"] / 1000000.0 * cached_input_rate)
+                    + (int(row.get("output_tokens") or 0) / 1000000.0 * output_rate),
+                    6,
+                )
+                return row
             def period_summary(conn, modifier: str):
                 row = dict(conn.execute("""
-                    SELECT COALESCE(SUM(input_tokens),0) input_tokens, COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(total_tokens),0) total_tokens, COUNT(*) updates
+                    SELECT COALESCE(SUM(input_tokens),0) input_tokens,
+                           COALESCE(SUM(cached_input_tokens),0) cached_input_tokens,
+                           COALESCE(SUM(output_tokens),0) output_tokens,
+                           COALESCE(SUM(reasoning_tokens),0) reasoning_tokens,
+                           COALESCE(SUM(total_tokens),0) total_tokens,
+                           COUNT(*) updates
                     FROM project_events
                     WHERE total_tokens>0 AND datetime(created_at) >= datetime('now', ?)
                 """, (modifier,)).fetchone())
-                row["estimated_cost_usd"] = round((row["input_tokens"] / 1000000.0 * input_rate) + (row["output_tokens"] / 1000000.0 * output_rate), 6)
-                return row
+                return add_cost(row)
             with connect() as conn:
                 periods = {"last_24h": period_summary(conn, "-24 hours"), "last_7d": period_summary(conn, "-7 days"), "last_30d": period_summary(conn, "-30 days")}
-            return self.json_response({"input_rate_per_million": input_rate, "output_rate_per_million": output_rate, "periods": periods})
+            return self.json_response({"input_rate_per_million": input_rate, "cached_input_rate_per_million": cached_input_rate, "output_rate_per_million": output_rate, "periods": periods})
         if path == "/api/token-summary":
             day = parse_qs(parsed.query).get("date", [now_iso()[:10]])[0]
             with connect() as conn:
-                totals = dict(conn.execute("SELECT COALESCE(SUM(input_tokens),0) input_tokens, COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(total_tokens),0) total_tokens, COUNT(*) updates FROM project_events WHERE substr(created_at,1,10)=? AND total_tokens>0", (day,)).fetchone())
-                by_agent = [dict(r) for r in conn.execute("SELECT agent_id, COALESCE(SUM(input_tokens),0) input_tokens, COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(total_tokens),0) total_tokens, COUNT(*) updates FROM project_events WHERE substr(created_at,1,10)=? AND total_tokens>0 GROUP BY agent_id ORDER BY total_tokens DESC", (day,)).fetchall()]
+                totals = dict(conn.execute("SELECT COALESCE(SUM(input_tokens),0) input_tokens, COALESCE(SUM(cached_input_tokens),0) cached_input_tokens, COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(reasoning_tokens),0) reasoning_tokens, COALESCE(SUM(total_tokens),0) total_tokens, COUNT(*) updates FROM project_events WHERE substr(created_at,1,10)=? AND total_tokens>0", (day,)).fetchone())
+                by_agent = [dict(r) for r in conn.execute("SELECT agent_id, COALESCE(SUM(input_tokens),0) input_tokens, COALESCE(SUM(cached_input_tokens),0) cached_input_tokens, COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(reasoning_tokens),0) reasoning_tokens, COALESCE(SUM(total_tokens),0) total_tokens, COUNT(*) updates FROM project_events WHERE substr(created_at,1,10)=? AND total_tokens>0 GROUP BY agent_id ORDER BY total_tokens DESC", (day,)).fetchall()]
                 by_project = [dict(r) for r in conn.execute("""
-                    SELECT e.project_id, COALESCE(p.name,'Tracker') project_name, COALESCE(SUM(e.input_tokens),0) input_tokens, COALESCE(SUM(e.output_tokens),0) output_tokens, COALESCE(SUM(e.total_tokens),0) total_tokens, COUNT(*) updates
+                    SELECT e.project_id, COALESCE(p.name,'Tracker') project_name, COALESCE(SUM(e.input_tokens),0) input_tokens, COALESCE(SUM(e.cached_input_tokens),0) cached_input_tokens, COALESCE(SUM(e.output_tokens),0) output_tokens, COALESCE(SUM(e.reasoning_tokens),0) reasoning_tokens, COALESCE(SUM(e.total_tokens),0) total_tokens, COUNT(*) updates
                     FROM project_events e LEFT JOIN projects p ON p.id=e.project_id
                     WHERE substr(e.created_at,1,10)=? AND e.total_tokens>0
                     GROUP BY e.project_id, p.name ORDER BY total_tokens DESC
@@ -1107,7 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
                             UPDATE projects SET name=?, stage=?, priority=?, owner=?, due_date=?, summary=?, completed_items=?, next_steps=?, blockers=?, responsible_agent_id=?, backup_agent_id=?, human_owner=?, next_action_owner=?, visibility=?, automation_policy=?, tags=?, last_verified_by=?, last_verified_at=?, updated_at=?, project_code=? WHERE id=?
                         """, (merged["name"], merged["stage"], merged["priority"], merged["owner"], merged["due_date"], merged["summary"], json.dumps(merged["completed_items"]), json.dumps(merged["next_steps"]), json.dumps(merged["blockers"]), merged["responsible_agent_id"], merged["backup_agent_id"], merged["human_owner"], merged["next_action_owner"], merged["visibility"], merged["automation_policy"], json.dumps(merged["tags"]), agent["id"], stamp, stamp, make_project_code(conn, merged["responsible_agent_id"], merged["name"], project_id), project_id))
                         after = project_from_row(conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone())
-                    event(conn, project_id, agent["id"], "project_update_report", summary, before, after, input_tokens=payload.get("input_tokens", 0), output_tokens=payload.get("output_tokens", 0), total_tokens=payload.get("total_tokens"), model=str(payload.get("model", "")).strip(), commit_refs=payload.get("commit_refs", []))
+                    event(conn, project_id, agent["id"], "project_update_report", summary, before, after, input_tokens=payload.get("input_tokens", 0), cached_input_tokens=payload.get("cached_input_tokens", 0), output_tokens=payload.get("output_tokens", 0), reasoning_tokens=payload.get("reasoning_tokens", 0), total_tokens=payload.get("total_tokens"), model=str(payload.get("model", "")).strip(), commit_refs=payload.get("commit_refs", []))
                     ev = event_from_row(conn.execute("SELECT e.*, p.name AS project_name FROM project_events e LEFT JOIN projects p ON p.id=e.project_id ORDER BY e.id DESC LIMIT 1").fetchone())
                 return self.json_response(ev, HTTPStatus.CREATED)
             except PermissionError as exc:
