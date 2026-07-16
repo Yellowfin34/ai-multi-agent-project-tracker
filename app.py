@@ -167,7 +167,7 @@ def title_acronym(name: str) -> str:
     for w in words:
         if not w:
             continue
-        # Preserve CamelCase/ALLCAP chunks like RingCentral -> RC, HAKIT -> H.
+        # Preserve CamelCase/ALLCAP chunks like ServiceHub -> SH, APIKit -> AK.
         caps = re.findall(r"[A-Z]", w)
         if len(caps) >= 2 and not w.isupper():
             letters.extend(caps)
