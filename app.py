@@ -49,22 +49,20 @@ PRIORITIES = ["High", "Medium", "Low"]
 REQUEST_TYPES = ["owner_change", "mark_production", "cross_project_update", "restore_archived", "permission_change"]
 
 SEED_AGENTS = [
-    # Customize these seed agents for your team before first run, or edit them
-    # later in SQLite. Only the admin agent can approve Production status,
-    # change permissions, and reassign project owners.
-    {"id": "admin", "display_name": "Admin Agent", "profile_name": "default", "role_summary": "Primary coordinator and project tracker administrator.", "is_admin": 1, "can_mark_production": 1, "can_reassign_projects": 1, "can_change_permissions": 1, "allowed_tags": ["all"]},
-    {"id": "agent-alpha", "display_name": "Agent Alpha", "profile_name": "agent-alpha", "role_summary": "Example worker agent for assigned projects.", "is_admin": 0, "allowed_tags": ["assigned", "example"]},
-    {"id": "agent-beta", "display_name": "Agent Beta", "profile_name": "agent-beta", "role_summary": "Example support agent for assigned projects and handoffs.", "is_admin": 0, "allowed_tags": ["assigned", "support"]},
-    {"id": "agent-gamma", "display_name": "Agent Gamma", "profile_name": "agent-gamma", "role_summary": "Example specialist agent for a separate project lane.", "is_admin": 0, "allowed_tags": ["assigned", "specialist"]},
+    # Generic sample agents for a fresh install. Replace these with your real
+    # assistant/worker profiles in SQLite after first run if desired.
+    {"id": "admin", "display_name": "Coordinator Agent", "profile_name": "default", "role_summary": "Primary coordinator and project tracker administrator.", "is_admin": 1, "can_mark_production": 1, "can_reassign_projects": 1, "can_change_permissions": 1, "allowed_tags": ["all"]},
+    {"id": "research", "display_name": "Research Agent", "profile_name": "research", "role_summary": "Research and discovery support for assigned projects.", "is_admin": 0, "allowed_tags": ["research", "assigned"]},
+    {"id": "operations", "display_name": "Operations Agent", "profile_name": "operations", "role_summary": "Operations and follow-up support for assigned projects.", "is_admin": 0, "allowed_tags": ["operations", "assigned"]},
 ]
 
 SEED_PROJECTS = [
-    # Sample projects are intentionally generic. Delete or replace them after
-    # installation. Project codes are generated as AGENT-ACRONYM, for example
-    # ADMI-PT for Admin Agent + Project Tracker.
-    {"name": "Project Tracker Setup", "stage": "In Progress", "priority": "High", "owner": "Admin Agent", "responsible_agent_id": "admin", "backup_agent_id": "agent-beta", "summary": "Install and configure the shared multi-agent project tracker.", "completed_items": ["Application started", "SQLite database initialized", "Agent API keys generated locally"], "next_steps": ["Replace sample agents with your real agents", "Store agent_tokens.json securely", "Create each agent's first owned project"], "blockers": []},
-    {"name": "Agent Alpha Daily Sync", "stage": "Planning", "priority": "Medium", "owner": "Agent Alpha", "responsible_agent_id": "agent-alpha", "summary": "Example recurring sync project for an agent-owned lane.", "completed_items": ["Project created as an example"], "next_steps": ["Schedule a cron job that posts updates through /api/projects/{id}/updates"], "blockers": []},
-    {"name": "Production Approval Example", "stage": "Intake", "priority": "Low", "owner": "Agent Beta", "responsible_agent_id": "agent-beta", "summary": "Demonstrates that worker agents request Production instead of changing stage directly.", "completed_items": [], "next_steps": ["Submit a mark_production request when ready"], "blockers": ["Waiting for admin review"]},
+    # Sample projects are generic and safe for public repos. Project codes are
+    # generated as AGENT-ACRONYM, for example COOR-PTS for Coordinator Agent +
+    # Project Tracker Setup.
+    {"name": "Project Tracker Setup", "stage": "In Progress", "priority": "High", "owner": "Coordinator Agent", "responsible_agent_id": "admin", "backup_agent_id": "operations", "summary": "Install and configure the shared multi-agent project tracker.", "completed_items": ["Application started", "SQLite database initialized", "Agent API keys generated locally"], "next_steps": ["Replace sample agents with your real agents", "Store agent_tokens.json securely", "Create each agent's first owned project"], "blockers": []},
+    {"name": "Research Intake Workflow", "stage": "Planning", "priority": "Medium", "owner": "Research Agent", "responsible_agent_id": "research", "summary": "Example recurring intake project for an agent-owned lane.", "completed_items": ["Project created as an example"], "next_steps": ["Schedule a cron job that posts updates through /api/projects/{id}/updates"], "blockers": []},
+    {"name": "Production Approval Example", "stage": "Intake", "priority": "Low", "owner": "Operations Agent", "responsible_agent_id": "operations", "summary": "Demonstrates that worker agents request Production instead of changing stage directly.", "completed_items": [], "next_steps": ["Submit a mark_production request when ready"], "blockers": ["Waiting for admin review"]},
 ]
 
 
@@ -374,7 +372,7 @@ def init_db() -> None:
 # Generate per-agent API keys. This writes bearer tokens to TOKEN_PATH.
 # Keep that file secret and out of git.
 def write_token_file(conn: sqlite3.Connection) -> None:
-    rows = conn.execute("SELECT id, display_name, profile_name, api_token, is_admin FROM agents ORDER BY is_admin DESC, id").fetchall()
+    rows = conn.execute("SELECT id, display_name, profile_name, api_token, is_admin FROM agents WHERE status='active' ORDER BY is_admin DESC, id").fetchall()
     data = {r["id"]: {"display_name": r["display_name"], "profile_name": r["profile_name"], "api_token": r["api_token"], "is_admin": bool(r["is_admin"])} for r in rows}
     TOKEN_PATH.write_text(json.dumps(data, indent=2) + "\n")
     os.chmod(TOKEN_PATH, 0o600)
@@ -448,9 +446,11 @@ HTML = r"""
     button.danger { background:var(--red); color:#28010a; }
     button.warn { background:var(--yellow); color:#291e00; }
     button:disabled { opacity:.48; cursor:not-allowed; }
-    .tabs { display:flex; flex-wrap:wrap; gap:8px; margin: 16px 0 20px; }
+    .tabs { display:flex; flex-wrap:wrap; gap:8px; margin: 16px 0 20px; align-items:center; }
     .tab { color:var(--text); background:#111827; border:1px solid var(--border); }
-    .tab.active { background:var(--accent); color:#06111f; }
+    .tab.active, .sort-tab.active { background:var(--accent); color:#06111f; }
+    .sort-tabs { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-left:4px; }
+    .sort-tab { color:var(--text); background:#111827; border:1px solid var(--border); }
     .stats { display:grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin: 12px 0 24px; }
     .stat { background:rgba(17,24,39,.82); border:1px solid var(--border); border-radius:16px; padding:15px; }
     .stat strong { font-size:28px; display:block; }
@@ -517,14 +517,19 @@ HTML = r"""
     <h1>AI Multi-Agent Project Tracker</h1>
     <div class="sub">Shared project and agent responsibility registry. Agents can read all projects; non-admin agents modify only their own projects and submit requests for ownership/Production changes.</div>
     <div class="toolbar" style="margin:16px 0 0">
-      <label>Sort by <select id="sortBy"><option value="agent" selected>Responsible agent</option><option value="stage">Stage</option><option value="priority">Priority</option><option value="agent-stage">Single agent pipeline by stage</option></select></label>
-      <label id="pipelineAgentLabel" style="display:none">Pipeline agent <select id="pipelineAgent"></select></label>
       <span id="permissionSummary" class="pill">Grouped by responsible agent; all projects remain visible.</span>
     </div>
   </header>
   <main>
     <div class="tabs">
       <button class="tab active" data-view="projects">Projects</button>
+      <span class="sort-tabs" aria-label="Project sort options">
+        <button class="sort-tab active" data-sort="agent">By agent</button>
+        <button class="sort-tab" data-sort="stage">By stage</button>
+        <button class="sort-tab" data-sort="priority">By priority</button>
+        <button class="sort-tab" data-sort="agent-stage">Pipeline</button>
+      </span>
+      <label id="pipelineAgentLabel" style="display:none">Pipeline agent <select id="pipelineAgent"></select></label>
       <button class="tab" data-view="agents">Agents</button>
       <button class="tab" data-view="requests">Requests</button>
       <button class="tab" data-view="activity">Activity</button>
@@ -595,7 +600,7 @@ HTML = r"""
 
 <script>
 const STAGES = __STAGES__;
-let projects = [], agents = [], requests = [], activity = [], calendarData = [], tokenData = {}, tokenCost = {}, currentAgentId = 'admin';
+let projects = [], agents = [], requests = [], activity = [], calendarData = [], tokenData = {}, tokenCost = {}, currentAgentId = 'admin', currentSortMode = 'agent';
 const $ = sel => document.querySelector(sel);
 const board = $('#board'), stats = $('#stats'), editor = $('#editor');
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -646,7 +651,8 @@ function renderAgentSelectors(){
   updateSortHelp();
 }
 function updateSortHelp(){
-  const mode = $('#sortBy') ? $('#sortBy').value : 'agent';
+  const mode = currentSortMode || 'agent';
+  document.querySelectorAll('.sort-tab').forEach(btn=>btn.classList.toggle('active', btn.dataset.sort === mode));
   const label = $('#pipelineAgentLabel');
   if(label) label.style.display = mode === 'agent-stage' ? 'flex' : 'none';
   const help = $('#permissionSummary');
@@ -691,7 +697,7 @@ function card(p, prefix=""){
 function render(){
   renderMainCost();
   let items=filtered(); renderStats(items); updateSortHelp();
-  const mode = $('#sortBy') ? $('#sortBy').value : 'agent';
+  const mode = currentSortMode || 'agent';
   if(mode === 'agent-stage'){
     const aid = $('#pipelineAgent')?.value || (agents[0]?.id || '');
     const pipeItems = items.filter(p=>p.responsible_agent_id===aid);
@@ -802,13 +808,14 @@ function renderTokens(){
 $('#stage').innerHTML = STAGES.map(s=>`<option>${s}</option>`).join('');
 $('#addBtn').onclick=()=>{ fillForm(); editor.showModal(); };
 $('#cancelBtn').onclick=()=>editor.close();
-if($('#sortBy')) $('#sortBy').onchange=render; if($('#pipelineAgent')) $('#pipelineAgent').onchange=render;
+if($('#pipelineAgent')) $('#pipelineAgent').onchange=render;
+document.querySelectorAll('.sort-tab').forEach(btn=>btn.onclick=()=>{ currentSortMode = btn.dataset.sort || 'agent'; document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active')); const projectsTab=document.querySelector('.tab[data-view="projects"]'); if(projectsTab) projectsTab.classList.add('active'); ['projects','agents','requests','activity','calendar','tokens'].forEach(v=>$('#'+v+'View').classList.toggle('hidden', v!=='projects')); render(); });
 document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{ document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active')); btn.classList.add('active'); ['projects','agents','requests','activity','calendar','tokens'].forEach(v=>$('#'+v+'View').classList.toggle('hidden', v!==btn.dataset.view)); });
 $('#projectForm').onsubmit=async e=>{ e.preventDefault(); const id=$('#projectId').value; try{ await api(id?`/api/projects/${id}`:'/api/projects', {method:id?'PUT':'POST', body:JSON.stringify(readForm())}); editor.close(); await load(); }catch(err){ alert(err.message); } };
 $('#deleteBtn').onclick=async()=>{ const id=$('#projectId').value; if(id && confirm('Archive this project?')){ await api(`/api/projects/${id}`, {method:'DELETE'}); editor.close(); await load(); } };
-$('#requestOwnerBtn').onclick=async()=>{ const id=$('#projectId').value; const target=prompt('Requested new owner agent id (admin, agent-alpha, agent-beta, agent-gamma):','agent-alpha'); if(!target) return; const reason=prompt('Reason for owner change request:','This project fits that agent better.'); await api(`/api/projects/${id}/requests`, {method:'POST', body:JSON.stringify({request_type:'owner_change', target_agent_id:target, requested_value:target, reason})}); alert('Request submitted'); editor.close(); await load(); };
+$('#requestOwnerBtn').onclick=async()=>{ const id=$('#projectId').value; const target=prompt('Requested new owner agent id (admin, research, operations):','research'); if(!target) return; const reason=prompt('Reason for owner change request:','This project fits that agent better.'); await api(`/api/projects/${id}/requests`, {method:'POST', body:JSON.stringify({request_type:'owner_change', target_agent_id:target, requested_value:target, reason})}); alert('Request submitted'); editor.close(); await load(); };
 $('#requestProdBtn').onclick=async()=>{ const id=$('#projectId').value; const reason=prompt('Reason/evidence for Production request:','Verified live and actively used.'); if(!reason) return; await api(`/api/projects/${id}/requests`, {method:'POST', body:JSON.stringify({request_type:'mark_production', requested_value:'Production', reason})}); alert('Production request submitted'); editor.close(); await load(); };
-$('#search').oninput=render; $('#priorityFilter').onchange=render; $('#ownerFilter').onchange=render; if($('#sortBy')) $('#sortBy').onchange=render; if($('#pipelineAgent')) $('#pipelineAgent').onchange=render; if($('#calendarRefresh')) $('#calendarRefresh').onclick=refreshCalendar; if($('#calendarMode')) $('#calendarMode').onchange=refreshCalendar; if($('#calendarPrev')) $('#calendarPrev').onclick=()=>{ const r=calendarRange(); const delta=r.mode==='month'?-30:r.mode==='week'?-7:-1; $('#calendarDate').value=dateStr(addDays(dateObj($('#calendarDate').value), delta)); refreshCalendar(); }; if($('#calendarNext')) $('#calendarNext').onclick=()=>{ const r=calendarRange(); const delta=r.mode==='month'?30:r.mode==='week'?7:1; $('#calendarDate').value=dateStr(addDays(dateObj($('#calendarDate').value), delta)); refreshCalendar(); }; if($('#calendarToday')) $('#calendarToday').onclick=()=>{ $('#calendarDate').value=todayLocal(); refreshCalendar(); }; if($('#tokenRefresh')) $('#tokenRefresh').onclick=refreshTokens; if($('#calendarDate')) $('#calendarDate').onchange=refreshCalendar; if($('#tokenDate')) $('#tokenDate').onchange=refreshTokens; if($('#pipelineAgent')) $('#pipelineAgent').onchange=render;
+$('#search').oninput=render; $('#priorityFilter').onchange=render; $('#ownerFilter').onchange=render; if($('#pipelineAgent')) $('#pipelineAgent').onchange=render; if($('#calendarRefresh')) $('#calendarRefresh').onclick=refreshCalendar; if($('#calendarMode')) $('#calendarMode').onchange=refreshCalendar; if($('#calendarPrev')) $('#calendarPrev').onclick=()=>{ const r=calendarRange(); const delta=r.mode==='month'?-30:r.mode==='week'?-7:-1; $('#calendarDate').value=dateStr(addDays(dateObj($('#calendarDate').value), delta)); refreshCalendar(); }; if($('#calendarNext')) $('#calendarNext').onclick=()=>{ const r=calendarRange(); const delta=r.mode==='month'?30:r.mode==='week'?7:1; $('#calendarDate').value=dateStr(addDays(dateObj($('#calendarDate').value), delta)); refreshCalendar(); }; if($('#calendarToday')) $('#calendarToday').onclick=()=>{ $('#calendarDate').value=todayLocal(); refreshCalendar(); }; if($('#tokenRefresh')) $('#tokenRefresh').onclick=refreshTokens; if($('#calendarDate')) $('#calendarDate').onchange=refreshCalendar; if($('#tokenDate')) $('#tokenDate').onchange=refreshTokens; if($('#pipelineAgent')) $('#pipelineAgent').onchange=render;
 load().catch(err=>{ board.innerHTML=`<pre>${esc(err.message)}</pre>`; });
 </script>
 </body>
@@ -832,9 +839,11 @@ CSS_ONLY = r'''
     button.danger { background:var(--red); color:#28010a; }
     button.warn { background:var(--yellow); color:#291e00; }
     button:disabled { opacity:.48; cursor:not-allowed; }
-    .tabs { display:flex; flex-wrap:wrap; gap:8px; margin: 16px 0 20px; }
+    .tabs { display:flex; flex-wrap:wrap; gap:8px; margin: 16px 0 20px; align-items:center; }
     .tab { color:var(--text); background:#111827; border:1px solid var(--border); }
-    .tab.active { background:var(--accent); color:#06111f; }
+    .tab.active, .sort-tab.active { background:var(--accent); color:#06111f; }
+    .sort-tabs { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-left:4px; }
+    .sort-tab { color:var(--text); background:#111827; border:1px solid var(--border); }
     .stats { display:grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin: 12px 0 24px; }
     .stat { background:rgba(17,24,39,.82); border:1px solid var(--border); border-radius:16px; padding:15px; }
     .stat strong { font-size:28px; display:block; }

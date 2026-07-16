@@ -1,26 +1,36 @@
-# Runtime secrets and local databases
+# Local runtime data / secrets
 agent_tokens.json
+project_tracker.db
 *.db
 *.db-*
 *.sqlite
 *.sqlite3
 *.dump
 
-# Python
+# Environment and secrets
+.env
+*.env
+
+# Python/build/cache
 __pycache__/
 *.py[cod]
-.venv/
-venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
 
-# Local/editor
+# OS/editor
 .DS_Store
 .idea/
 .vscode/
 
-# Logs/temp
+# Logs/backups/output
 logs/
+output/
 tmp/
 *.log
+*.bak*

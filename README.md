@@ -163,8 +163,8 @@ AGENT-ACRONYM
 Examples:
 
 ```text
-ADMI-PTS   = Admin Agent / Project Tracker Setup
-AGEN-AADS  = Agent Alpha / Agent Alpha Daily Sync
+COOR-PTS   = Coordinator Agent / Project Tracker Setup
+RESE-RIW   = Research Agent / Research Intake Workflow
 ```
 
 Codes are generated from the responsible agent and project title. If there is a collision, the tracker adds a numeric suffix.
@@ -180,10 +180,9 @@ Read the AI Multi-Agent Project Tracker. Review only projects assigned to this a
 Stagger jobs so agents do not all write at once, for example:
 
 ```text
-Admin:       0 20 * * *
-Agent Alpha: 5 20 * * *
-Agent Beta: 10 20 * * *
-Agent Gamma:15 20 * * *
+Coordinator: 0 20 * * *
+Research:    5 20 * * *
+Operations: 10 20 * * *
 ```
 
 ## Deployment notes
